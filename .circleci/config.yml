@@ -15,22 +15,18 @@ jobs:
           name: Instalar dependencias
           command: yarn install --frozen-lockfile || yarn install
       - run:
-          name: Smoke test (SQLite en carpeta escribible)
+          name: Preparar directorio requerido por la app (/etc/todos)
+          command: |
+            sudo mkdir -p /etc/todos
+            sudo chmod 777 /etc/todos
+            ls -ld /etc/todos
+      - run:
+          name: Smoke test (PORT=3000)
           command: |
             set -euo pipefail
             export PORT=3000
-            export DB_CLIENT=sqlite
-
-            # Carpeta escribible para la DB (evita /etc)
-            export DATA_DIR="$PWD/data"
-            mkdir -p "$DATA_DIR"
-
-            # Variables alternativas por si la app usa otros nombres
-            export TODO_DIR="$DATA_DIR"
-            export TODOS_DIR="$DATA_DIR"
-            export SQLITE_DIR="$DATA_DIR"
-            export SQLITE_PATH="$DATA_DIR/todos.sqlite"
-            export SQLITE_FILE="$DATA_DIR/todos.sqlite"
+            # Si tu app necesita forzar sqlite:
+            export DB_CLIENT=${DB_CLIENT:-sqlite}
 
             node src/index.js > app.log 2>&1 & APP_PID=$!
 
@@ -46,8 +42,6 @@ jobs:
 
             echo "App no respondió en ${PORT}. Últimas líneas del log:"
             tail -n 200 app.log || true
-            echo "--- Contenido de data/ ---"
-            ls -la "$DATA_DIR" || true
             kill $APP_PID || true
             exit 1
 
