@@ -45,22 +45,38 @@ jobs:
             kill $APP_PID || true
             exit 1
 
-  docker_build_and_push:
+    docker_build_and_push:
     docker:
       - image: cimg/base:stable
     steps:
       - checkout
       - setup_remote_docker
       - run:
-          name: Docker login
-          command: echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+          name: Verificar variables de Docker Hub
+          command: |
+            set -euo pipefail
+            if [ -z "${DOCKERHUB_USER:-}" ]; then echo "Falta DOCKERHUB_USER"; exit 1; fi
+            if [ -z "${DOCKERHUB_TOKEN:-}" ]; then echo "Falta DOCKERHUB_TOKEN"; exit 1; fi
+            echo "DOCKERHUB_USER length: ${#DOCKERHUB_USER}"
+            echo "TOKEN length: ${#DOCKERHUB_TOKEN}"
+      - run:
+          name: Docker login (stdin) con fallback
+          command: |
+            set -euo pipefail
+            echo "Intentando docker login con --password-stdin…"
+            if ! echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin; then
+              echo "Fallo login por stdin; probando con -p (modo compat)…"
+              docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_TOKEN"
+            fi
+            echo "Login OK"
       - run:
           name: Build & Tag
           command: |
+            set -euo pipefail
             APP_IMAGE="$DOCKERHUB_USER/todoapp"
             SHA_TAG=${CIRCLE_SHA1:0:7}
-            VERSION_TAG="<< pipeline.parameters.release_version >>"
-
+            VERSION_TAG="${CIRCLE_TAG:-}"
+            echo "Construyendo $APP_IMAGE:$SHA_TAG y latest"
             docker build -t "$APP_IMAGE:$SHA_TAG" -t "$APP_IMAGE:latest" .
             if [ -n "$VERSION_TAG" ]; then
               docker tag "$APP_IMAGE:$SHA_TAG" "$APP_IMAGE:$VERSION_TAG"
@@ -68,22 +84,12 @@ jobs:
       - run:
           name: Push
           command: |
+            set -euo pipefail
             APP_IMAGE="$DOCKERHUB_USER/todoapp"
             SHA_TAG=${CIRCLE_SHA1:0:7}
-            VERSION_TAG="<< pipeline.parameters.release_version >>"
-
+            VERSION_TAG="${CIRCLE_TAG:-}"
             docker push "$APP_IMAGE:$SHA_TAG"
             docker push "$APP_IMAGE:latest"
             if [ -n "$VERSION_TAG" ]; then
               docker push "$APP_IMAGE:$VERSION_TAG"
             fi
-
-workflows:
-  ci_cd:
-    jobs:
-      - build_and_smoke
-      - docker_build_and_push:
-          requires: [build_and_smoke]
-          filters:
-            branches:
-              only: [main]
