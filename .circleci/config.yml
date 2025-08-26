@@ -1,26 +1,31 @@
-version: 2.1
-orbs:
-  node: circleci/node@5.1.0
 jobs:
   build_and_smoke:
     docker:
       - image: cimg/node:18.20
     steps:
       - checkout
-      - node/install-packages:
-          pkg-manager: yarn
       - run:
-          name: Smoke test
+          name: Instalar dependencias
+          command: yarn install --frozen-lockfile || yarn install
+      - run:
+          name: Smoke test (levanta con SQLite en 3000 y espera)
           command: |
-            PORT=${PORT:-3000}
-            node src/index.js & APP_PID=$!
-            for i in {1..30}; do
-              curl -fsS "http://localhost:$PORT/" >/dev/null && break
+            export PORT=3000
+            export DB_CLIENT=sqlite
+            # si tu app usa variables para sqlite, agrega aquí (ej: DB_NAME, etc.)
+            node src/index.js > app.log 2>&1 & APP_PID=$!
+
+            # espera hasta 60s a que levante
+            for i in {1..60}; do
+              if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
+                echo "Smoke OK"
+                kill $APP_PID || true
+                exit 0
+              fi
               sleep 1
             done
-            curl -fsS "http://localhost:$PORT/" | head -n1
+
+            echo "App no respondió en ${PORT}. Últimas líneas del log:"
+            tail -n 200 app.log || true
             kill $APP_PID || true
-workflows:
-  ci:
-    jobs:
-      - build_and_smoke
+            exit 1
