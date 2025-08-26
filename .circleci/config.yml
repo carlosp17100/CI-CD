@@ -13,24 +13,21 @@ jobs:
       - checkout
       - run:
           name: Instalar dependencias
-          command: yarn install --frozen-lockfile || yarn install
+          command: |
+            yarn install --frozen-lockfile || yarn install
       - run:
-          name: Preparar directorio requerido por la app (/etc/todos)
+          name: Preparar /etc/todos (requerido por la app)
           command: |
             sudo mkdir -p /etc/todos
             sudo chmod 777 /etc/todos
             ls -ld /etc/todos
       - run:
-          name: Smoke test (PORT=3000)
+          name: Smoke test (SQLite, PORT=3000)
           command: |
             set -euo pipefail
             export PORT=3000
-            # Si tu app necesita forzar sqlite:
             export DB_CLIENT=${DB_CLIENT:-sqlite}
-
             node src/index.js > app.log 2>&1 & APP_PID=$!
-
-            # Esperar hasta 60s a que la app responda
             for i in {1..60}; do
               if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
                 echo "Smoke OK"
@@ -39,13 +36,12 @@ jobs:
               fi
               sleep 1
             done
-
-            echo "App no respondió en ${PORT}. Últimas líneas del log:"
+            echo "App no respondió. Últimas líneas del log:"
             tail -n 200 app.log || true
             kill $APP_PID || true
             exit 1
 
-    docker_build_and_push:
+  docker_build_and_push:
     docker:
       - image: cimg/base:stable
     steps:
@@ -63,11 +59,8 @@ jobs:
           name: Docker login (stdin) con fallback
           command: |
             set -euo pipefail
-            echo "Intentando docker login con --password-stdin…"
-            if ! echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin; then
-              echo "Fallo login por stdin; probando con -p (modo compat)…"
-              docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_TOKEN"
-            fi
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin || \
+            docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_TOKEN"
             echo "Login OK"
       - run:
           name: Build & Tag
@@ -76,7 +69,7 @@ jobs:
             APP_IMAGE="$DOCKERHUB_USER/todoapp"
             SHA_TAG=${CIRCLE_SHA1:0:7}
             VERSION_TAG="${CIRCLE_TAG:-}"
-            echo "Construyendo $APP_IMAGE:$SHA_TAG y latest"
+            echo "Construyendo $APP_IMAGE:$SHA_TAG y :latest"
             docker build -t "$APP_IMAGE:$SHA_TAG" -t "$APP_IMAGE:latest" .
             if [ -n "$VERSION_TAG" ]; then
               docker tag "$APP_IMAGE:$SHA_TAG" "$APP_IMAGE:$VERSION_TAG"
@@ -93,3 +86,15 @@ jobs:
             if [ -n "$VERSION_TAG" ]; then
               docker push "$APP_IMAGE:$VERSION_TAG"
             fi
+
+workflows:
+  ci_cd:
+    jobs:
+      - build_and_smoke
+      - docker_build_and_push:
+          requires:
+            - build_and_smoke
+          filters:
+            branches:
+              only:
+                - main
