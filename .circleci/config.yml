@@ -1,5 +1,10 @@
 version: 2.1
 
+parameters:
+  release_version:
+    type: string
+    default: ""
+
 jobs:
   build_and_smoke:
     docker:
@@ -10,12 +15,26 @@ jobs:
           name: Instalar dependencias
           command: yarn install --frozen-lockfile || yarn install
       - run:
-          name: Smoke test (SQLite + PORT=3000)
+          name: Smoke test (SQLite en carpeta escribible)
           command: |
+            set -euo pipefail
             export PORT=3000
             export DB_CLIENT=sqlite
+
+            # Carpeta escribible para la DB (evita /etc)
+            export DATA_DIR="$PWD/data"
+            mkdir -p "$DATA_DIR"
+
+            # Variables alternativas por si la app usa otros nombres
+            export TODO_DIR="$DATA_DIR"
+            export TODOS_DIR="$DATA_DIR"
+            export SQLITE_DIR="$DATA_DIR"
+            export SQLITE_PATH="$DATA_DIR/todos.sqlite"
+            export SQLITE_FILE="$DATA_DIR/todos.sqlite"
+
             node src/index.js > app.log 2>&1 & APP_PID=$!
 
+            # Esperar hasta 60s a que la app responda
             for i in {1..60}; do
               if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
                 echo "Smoke OK"
@@ -25,12 +44,52 @@ jobs:
               sleep 1
             done
 
-            echo "App no respondió. Últimas líneas del log:"
+            echo "App no respondió en ${PORT}. Últimas líneas del log:"
             tail -n 200 app.log || true
+            echo "--- Contenido de data/ ---"
+            ls -la "$DATA_DIR" || true
             kill $APP_PID || true
             exit 1
 
+  docker_build_and_push:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Docker login
+          command: echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+      - run:
+          name: Build & Tag
+          command: |
+            APP_IMAGE="$DOCKERHUB_USER/todoapp"
+            SHA_TAG=${CIRCLE_SHA1:0:7}
+            VERSION_TAG="<< pipeline.parameters.release_version >>"
+
+            docker build -t "$APP_IMAGE:$SHA_TAG" -t "$APP_IMAGE:latest" .
+            if [ -n "$VERSION_TAG" ]; then
+              docker tag "$APP_IMAGE:$SHA_TAG" "$APP_IMAGE:$VERSION_TAG"
+            fi
+      - run:
+          name: Push
+          command: |
+            APP_IMAGE="$DOCKERHUB_USER/todoapp"
+            SHA_TAG=${CIRCLE_SHA1:0:7}
+            VERSION_TAG="<< pipeline.parameters.release_version >>"
+
+            docker push "$APP_IMAGE:$SHA_TAG"
+            docker push "$APP_IMAGE:latest"
+            if [ -n "$VERSION_TAG" ]; then
+              docker push "$APP_IMAGE:$VERSION_TAG"
+            fi
+
 workflows:
-  ci:
+  ci_cd:
     jobs:
       - build_and_smoke
+      - docker_build_and_push:
+          requires: [build_and_smoke]
+          filters:
+            branches:
+              only: [main]
