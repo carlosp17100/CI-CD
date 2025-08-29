@@ -1,100 +1,60 @@
 version: 2.1
 
-parameters:
-  release_version:
-    type: string
-    default: ""
-
 jobs:
   build_and_smoke:
     docker:
-      - image: cimg/node:18.20
-    steps:
-      - checkout
-      - run:
-          name: Instalar dependencias
-          command: |
-            yarn install --frozen-lockfile || yarn install
-      - run:
-          name: Preparar /etc/todos (requerido por la app)
-          command: |
-            sudo mkdir -p /etc/todos
-            sudo chmod 777 /etc/todos
-            ls -ld /etc/todos
-      - run:
-          name: Smoke test (SQLite, PORT=3000)
-          command: |
-            set -euo pipefail
-            export PORT=3000
-            export DB_CLIENT=${DB_CLIENT:-sqlite}
-            node src/index.js > app.log 2>&1 & APP_PID=$!
-            for i in {1..60}; do
-              if curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1; then
-                echo "Smoke OK"
-                kill $APP_PID || true
-                exit 0
-              fi
-              sleep 1
-            done
-            echo "App no respondió. Últimas líneas del log:"
-            tail -n 200 app.log || true
-            kill $APP_PID || true
-            exit 1
-
-  docker_build_and_push:
-    docker:
       - image: cimg/base:stable
+    environment:
+      IMAGE_NAME: "${DOCKERHUB_USER}/todoapp"
+      IMAGE_TAG: "${CIRCLE_SHA1:0:7}"
     steps:
       - checkout
       - setup_remote_docker
       - run:
-          name: Verificar variables de Docker Hub
+          name: Build Docker image
           command: |
-            set -euo pipefail
-            if [ -z "${DOCKERHUB_USER:-}" ]; then echo "Falta DOCKERHUB_USER"; exit 1; fi
-            if [ -z "${DOCKERHUB_TOKEN:-}" ]; then echo "Falta DOCKERHUB_TOKEN"; exit 1; fi
-            echo "DOCKERHUB_USER length: ${#DOCKERHUB_USER}"
-            echo "TOKEN length: ${#DOCKERHUB_TOKEN}"
+            docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" -t "${IMAGE_NAME}:latest" .
       - run:
-          name: Docker login (stdin) con fallback
+          name: Smoke test (container)
           command: |
-            set -euo pipefail
-            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin || \
-            docker login -u "$DOCKERHUB_USER" -p "$DOCKERHUB_TOKEN"
-            echo "Login OK"
+            cid=$(docker run -d -e PORT=3000 -p 3000:3000 "${IMAGE_NAME}:${IMAGE_TAG}")
+            # espera a que responda
+            for i in $(seq 1 30); do
+              if curl -fsS http://localhost:3000/ >/dev/null; then echo "SMOKE OK"; break; fi
+              sleep 1
+            done
+            curl -fsS http://localhost:3000/ >/dev/null
+            docker logs "$cid" --tail 50 || true
+            docker stop "$cid" >/dev/null
+
+  docker_build_and_push:
+    docker:
+      - image: cimg/base:stable
+    environment:
+      IMAGE_NAME: "${DOCKERHUB_USER}/todoapp"
+      IMAGE_TAG: "${CIRCLE_SHA1:0:7}"
+    steps:
+      - checkout
+      - setup_remote_docker
       - run:
-          name: Build & Tag
-          command: |
-            set -euo pipefail
-            APP_IMAGE="$DOCKERHUB_USER/todoapp"
-            SHA_TAG=${CIRCLE_SHA1:0:7}
-            VERSION_TAG="${CIRCLE_TAG:-}"
-            echo "Construyendo $APP_IMAGE:$SHA_TAG y :latest"
-            docker build -t "$APP_IMAGE:$SHA_TAG" -t "$APP_IMAGE:latest" .
-            if [ -n "$VERSION_TAG" ]; then
-              docker tag "$APP_IMAGE:$SHA_TAG" "$APP_IMAGE:$VERSION_TAG"
-            fi
+          name: Docker login
+          command: echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
       - run:
-          name: Push
+          name: Build & Push
           command: |
-            set -euo pipefail
-            APP_IMAGE="$DOCKERHUB_USER/todoapp"
-            SHA_TAG=${CIRCLE_SHA1:0:7}
-            VERSION_TAG="${CIRCLE_TAG:-}"
-            docker push "$APP_IMAGE:$SHA_TAG"
-            docker push "$APP_IMAGE:latest"
-            if [ -n "$VERSION_TAG" ]; then
-              docker push "$APP_IMAGE:$VERSION_TAG"
-            fi
+            docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" -t "${IMAGE_NAME}:latest" .
+            docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+            docker push "${IMAGE_NAME}:latest"
+      - run:
+          name: Export image tag
+          command: echo "export IMAGE_TAG=${IMAGE_TAG}" >> $BASH_ENV
 
 workflows:
   ci_cd:
     jobs:
       - build_and_smoke
       - docker_build_and_push:
-          requires:
-            - build_and_smoke
+          requires: [build_and_smoke]
           filters:
             branches:
-              only:
-                - main
+              only: [main]
